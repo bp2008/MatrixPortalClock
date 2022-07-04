@@ -1,5 +1,5 @@
 # MatrixPortalClock
-Clock software for Adafruit Matrix Portal M4.  Uses MQTT to synchronize time and load custom text which is displayed on two lines below the clockface.
+Clock software for Adafruit Matrix Portal M4.  Uses MQTT to synchronize time and load custom text which is displayed on two scrolling lines below the clockface.
 
 ![image](https://user-images.githubusercontent.com/5639911/177080414-0278940d-b21d-47f8-8c5d-bf52543f906b.png)
 

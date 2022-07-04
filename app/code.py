@@ -216,16 +216,8 @@ def maintainMqtt():
                 setError("MQTT CONN FAIL: " + exprint(e))
                 loop_n_times(50)
                 setError("WiFi Reconnect")
-                if esp.is_connected:
-                    try:
-                        #if type(e).__name__ == "RuntimeError" and str(e) == "Failed to request hostname":
-                        #    print("Hard resetting ESP32 chip")
-                        #    esp.reset() # THIS DOES NOT FIX THE DNS LOOKUP FAILURE
-                        #else:
-                        esp.disconnect()
-                    except OSError as e:
-                        print("WiFi Disconnect Failed: " + exprint(e))
-                        setError("WiFi Disconnect Failed: " + exprint(e))
+                dropWifi()
+                #if type(e).__name__ == "RuntimeError" and str(e) == "Failed to request hostname":
                 return False
 
             print("Connected to MQTT broker! Subscribing to topics...")
@@ -257,7 +249,22 @@ def requestTimesync():
     except (ValueError, RuntimeError, MQTT.MMQTTException) as e:
         print("Time Sync Request Failed: " + exprint(e))
         setError("Time Sync Request Failed: " + exprint(e))
+        loop_n_times(50)
+        dropWifi()
         return False
+
+
+def dropWifi(hardResetEsp):
+    try:
+        if hardResetEsp:
+            print("Hard resetting ESP32 chip")
+            esp.reset() # THIS DOES NOT FIX DNS LOOKUP FAILURE
+        else:
+            esp.disconnect()
+    except OSError as e:
+        print("WiFi Disconnect Failed: " + exprint(e))
+        setError("WiFi Disconnect Failed: " + exprint(e))
+
 
 
 def clockUpdate(*, hours=None, minutes=None):

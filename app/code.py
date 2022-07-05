@@ -23,7 +23,6 @@ display = matrix.display
 group = displayio.Group()
 display.show(group)
 
-
 ### Load Secrets ###
 try:
     from secrets import secrets
@@ -37,6 +36,7 @@ color_wifi = secrets["color_wifi"]
 status_light = neopixel.NeoPixel(board.NEOPIXEL, 1, brightness=1)
 status_light.fill(color_nowifi)
 status_light.fill(color_nowifi)  # First call sometimes sets the wrong color
+
 
 ### Text setup ###
 def MakeLabel(font, color, x, y, scrollAfter=0):
@@ -77,7 +77,6 @@ small_label2.full_text = "LOADING"
 rxFindColorTag = re.compile(
     "^#([0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])#")
 
-
 ### Configure ESP chip (for WiFi) ###
 esp32_cs = DigitalInOut(board.ESP_CS)
 esp32_ready = DigitalInOut(board.ESP_BUSY)
@@ -100,8 +99,8 @@ def exprint(e):
     return type(e).__name__ + ": " + str(e)
 
 
-def loop_n_times(n):
-    for _ in range(n):
+def loop_n_sec(n):
+    for _ in range(round(n * 5)):
         time.sleep(0.2)
         clockUpdate()
         ScrollLabel(small_label1)
@@ -191,9 +190,9 @@ def maintainWifi():
             print("Connected WiFi to", str(esp.ssid, "utf-8"), "with RSSI:",
                   esp.rssi)
             setSuccess("WiFi Connected")
-        except RuntimeError as e:
-            print("WiFi Failed: " + exprint(e))
-            setError("WiFi Failed: " + exprint(e))
+        except (RuntimeError, ConnectionError) as e:
+            print("WiFi Connect Failed: " + exprint(e))
+            setError("WiFi Connect Failed: " + exprint(e))
             status_light.fill(color_nowifi)
             return False
     return True
@@ -211,10 +210,10 @@ def maintainMqtt():
 
             try:
                 mqtt_client.reconnect(resub_topics=False)
-            except (ValueError, RuntimeError, MQTT.MMQTTException) as e:
+            except (ValueError, RuntimeError, ConnectionError, MQTT.MMQTTException) as e:
                 print("Failed to connect to MQTT: " + exprint(e))
                 setError("MQTT CONN FAIL: " + exprint(e))
-                loop_n_times(50)
+                loop_n_sec(15)
                 setError("WiFi Reconnect")
                 dropWifi()
                 #if type(e).__name__ == "RuntimeError" and str(e) == "Failed to request hostname":
@@ -230,7 +229,7 @@ def maintainMqtt():
         # Do non-blocking MQTT client work
         mqtt_client.loop(timeout=0.2)
         return True
-    except (ValueError, RuntimeError, MQTT.MMQTTException) as e:
+    except (ValueError, RuntimeError, ConnectionError, MQTT.MMQTTException) as e:
         print("MQTT ERROR: " + exprint(e))
         setError("MQTT ERROR: " + exprint(e))
         return False
@@ -246,25 +245,36 @@ def requestTimesync():
     try:
         mqtt_client.publish(mqtt_topic_time, "", retain=False, qos=0)
         lastTimesync = performance_now()
-    except (ValueError, RuntimeError, MQTT.MMQTTException) as e:
+    except (ValueError, RuntimeError, ConnectionError, MQTT.MMQTTException) as e:
         print("Time Sync Request Failed: " + exprint(e))
         setError("Time Sync Request Failed: " + exprint(e))
-        loop_n_times(50)
+        loop_n_sec(10)
         dropWifi()
         return False
 
 
-def dropWifi(hardResetEsp):
+def dropWifi(hardResetEsp=False):
     try:
+        setWarning("MQTT D/Cing")
+        loop_n_sec(1)
+        try:
+            mqtt_client.disconnect()
+        except (ValueError, RuntimeError, ConnectionError, MQTT.MMQTTException) as e:
+            print("Failed to disconnect MQTT: " + exprint(e))
+            setError("MQTT D/C FAIL: " + exprint(e))
+            loop_n_sec(15)
+        setWarning("WiFi D/Cing")
+        loop_n_sec(1)
         if hardResetEsp:
             print("Hard resetting ESP32 chip")
-            esp.reset() # THIS DOES NOT FIX DNS LOOKUP FAILURE
+            esp.reset()  # THIS DOES NOT FIX DNS LOOKUP FAILURE
         else:
             esp.disconnect()
+        setWarning("WiFi D/Ced")
+        loop_n_sec(1)
     except OSError as e:
         print("WiFi Disconnect Failed: " + exprint(e))
-        setError("WiFi Disconnect Failed: " + exprint(e))
-
+        setError("WiFi D/C FAIL: " + exprint(e))
 
 
 def clockUpdate(*, hours=None, minutes=None):
@@ -365,8 +375,8 @@ while True:
                     requestTimesync()
 
         if not allOk:
-            loop_n_times(5)
-    except (ValueError, RuntimeError) as e:
+            loop_n_sec(1)
+    except (ValueError, RuntimeError, ConnectionError) as e:
         print("Error in outer loop: " + str(e))
         setError("LOOP ERROR: " + exprint(e))
         time.sleep(10)

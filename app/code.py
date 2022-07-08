@@ -9,6 +9,9 @@ import adafruit_esp32spi.adafruit_esp32spi_socket as socket
 import adafruit_minimqtt.adafruit_minimqtt as MQTT
 import rtc
 import re
+import supervisor
+import microcontroller
+import storage
 
 # Clock-related imports
 from adafruit_matrixportal.matrix import Matrix
@@ -107,6 +110,23 @@ def loop_n_sec(n):
         ScrollLabel(small_label2)
 
 
+#def is_usb_connected():
+#    try:
+#        storage.remount('/', readonly=False)  # attempt to mount readwrite
+#        storage.remount('/', readonly=True)  # attempt to mount readonly
+#    except RuntimeError as e:
+#        return True
+#    return False
+
+#is_usb = "CONNECTED" if is_usb_connected() else "NOT CONNECTED"
+#print("USB is " + is_usb)
+
+if supervisor.runtime.usb_connected:
+    print("USB is connected")
+else:
+    print("USB is NOT connected")
+
+
 def bptime():
     """Returns the local time in integer seconds since the unix epoch. Uses the global variable time_offset to store the offset."""
     return ((time.monotonic_ns() // 1000000) + time_offset) // 1000
@@ -190,6 +210,11 @@ def maintainWifi():
             print("Connected WiFi to", str(esp.ssid, "utf-8"), "with RSSI:",
                   esp.rssi)
             setSuccess("WiFi Connected")
+            
+            try:
+                mqtt_client.disconnect()
+            except (ValueError, RuntimeError, ConnectionError, MQTT.MMQTTException) as e:
+                pass
         except (RuntimeError, ConnectionError) as e:
             print("WiFi Connect Failed: " + exprint(e))
             setError("WiFi Connect Failed: " + exprint(e))
@@ -231,12 +256,16 @@ def maintainMqtt():
         return True
     except (ValueError, RuntimeError, ConnectionError, MQTT.MMQTTException) as e:
         print("MQTT ERROR: " + exprint(e))
-        setError("MQTT ERROR: " + exprint(e))
+        if type(e).__name__ == "MMQTTException" and str(e) == "PINGRESP not returned from broker.":
+            pass
+        else:
+            setError("MQTT ERROR: " + exprint(e))
         return False
 
 
 def requestTimesync():
     global lastTimesync
+    #print("MEM: " + str(gc.mem_free()))
     try:
         mqtt_client.is_connected()  # throws if not connected
     except MQTT.MMQTTException as e:
@@ -255,14 +284,7 @@ def requestTimesync():
 
 def dropWifi(hardResetEsp=False):
     try:
-        setWarning("MQTT D/Cing")
-        loop_n_sec(1)
-        try:
-            mqtt_client.disconnect()
-        except (ValueError, RuntimeError, ConnectionError, MQTT.MMQTTException) as e:
-            print("Failed to disconnect MQTT: " + exprint(e))
-            setError("MQTT D/C FAIL: " + exprint(e))
-            loop_n_sec(15)
+        print("WiFi D/Cing")
         setWarning("WiFi D/Cing")
         loop_n_sec(1)
         if hardResetEsp:
@@ -270,10 +292,19 @@ def dropWifi(hardResetEsp=False):
             esp.reset()  # THIS DOES NOT FIX DNS LOOKUP FAILURE
         else:
             esp.disconnect()
+        print("WiFi D/Ced")
         setWarning("WiFi D/Ced")
         loop_n_sec(1)
+        print("Soft Rebooting")
+        setWarning("Soft Rebooting")
+        loop_n_sec(1)
+        supervisor.reload()
+        #print("Hard Rebooting")
+        #setWarning("Hard Rebooting")
+        #loop_n_sec(1)
+        #microcontroller.reset()
     except OSError as e:
-        print("WiFi Disconnect Failed: " + exprint(e))
+        print("WiFi D/C FAIL: " + exprint(e))
         setError("WiFi D/C FAIL: " + exprint(e))
 
 
@@ -354,6 +385,7 @@ mqtt_client = MQTT.MQTT(
     port=secrets["mqttport"],
     username=secrets["mqttuser"],
     password=secrets["mqttpass"],
+	keep_alive=12
 )
 # mqtt_client.on_connect = connected
 mqtt_client.on_disconnect = disconnected
@@ -362,10 +394,10 @@ mqtt_client.on_message = message
 allOk = False
 while True:
     try:
+        startTs = performance_now()
         clockUpdate()
         ScrollLabel(small_label1)
         ScrollLabel(small_label2)
-        #print("MEM: " + str(gc.mem_free()))
 
         allOk = False
         if maintainWifi():
@@ -374,7 +406,11 @@ while True:
                 if lastTimesync + 60000 < performance_now():
                     requestTimesync()
 
-        if not allOk:
+        if allOk:
+            remainingMs = 200 - (performance_now() - startTs)
+            if remainingMs > 10:
+                time.sleep(remainingMs / 1000.0)
+        else:
             loop_n_sec(1)
     except (ValueError, RuntimeError, ConnectionError) as e:
         print("Error in outer loop: " + str(e))

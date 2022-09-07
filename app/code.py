@@ -12,11 +12,13 @@ import re
 import supervisor
 import microcontroller
 import storage
+import traceback
 
 # Clock-related imports
 from adafruit_matrixportal.matrix import Matrix
 from adafruit_display_text.label import Label
 from scrolling_label import ScrollingLabel
+#from vertical_scrolling_label import VerticalScrollingLabel
 from adafruit_bitmap_font import bitmap_font
 
 ### Display setup ###
@@ -46,9 +48,10 @@ def MakeLabel(font, color, x, y, scrollAfter=0):
     if scrollAfter:
         lbl = ScrollingLabel(font,
                              max_characters=scrollAfter,
-                             animate_time=0.2)
+                             animate_time=0.2,
+                             tab_replacement=(1, " "))
     else:
-        lbl = Label(font)
+        lbl = Label(font, tab_replacement=(2, " "))
     lbl.color = color
     lbl.x = x
     lbl.y = y
@@ -64,6 +67,12 @@ smallFont = bitmap_font.load_font("tom-thumb-modified.pcf")
 clock_label = MakeLabel(clockFont, 0xFFFF00, 0, 9)
 small_label1 = MakeLabel(smallFont, 0x1F0000, 0, display.height - 9, 16)
 small_label2 = MakeLabel(smallFont, 0x200000, 0, display.height - 3, 16)
+#crashDumpLabel = VerticalScrollingLabel(smallFont, max_characters=16, max_lines=5)
+#crashDumpLabel.color = 0xFF0000
+#crashDumpLabel.x = 0
+#crashDumpLabel.y = 3
+#crashDumpLabel.background_color = 0x000000
+#group.append(crashDumpLabel)
 
 clock_label.text = ""
 small_label2.full_text = "LOADING FONTS"
@@ -98,8 +107,20 @@ def ScrollLabel(lbl):
         lbl.update(True)
 
 
-def exprint(e):
-    return type(e).__name__ + ": " + str(e)
+def exprint(e, includeStack=False, singleLine=False):
+    if includeStack:
+        #fullMsg = type(e).__name__ + ": " + str(e)
+        fullMsg = traceback.format_exception(type(e), e, e.__traceback__)
+        fullMsg = fullMsg.replace("\t", "  ")
+        if singleLine:
+            fullMsg = fullMsg.replace("\r\n", "  ")
+            fullMsg = fullMsg.replace("\r", "  ")
+            fullMsg = fullMsg.replace("\n", "  ")
+        else:
+            fullMsg = fullMsg.replace("\r\n", "\n").replace("\r", "\n")
+        return fullMsg
+    else:
+        return type(e).__name__ + ": " + str(e)
 
 
 def loop_n_sec(n):
@@ -125,6 +146,37 @@ if supervisor.runtime.usb_connected:
     print("USB is connected")
 else:
     print("USB is NOT connected")
+
+
+def writeErrorFile(message):
+    if not supervisor.runtime.usb_connected:
+        try:
+            storage.remount('/', readonly=False)
+        except RuntimeError as e:
+            return
+        with open('LastError.txt', 'w') as f:
+            now = 0
+            try:
+                now = time.localtime(bptime())  # Get the time values we need
+            except OverflowError as e:
+                now = time.localtime()
+            f.write(timeToDateString(now))
+            f.write("\n")
+            f.write(message)
+    else:
+        print("USB is connected. Will not write error file.")
+
+
+def timeToDateString(t: time.struct_time):
+    hours = t[3]
+    tt = "AM"
+    if hours > 12:  # Handle times later than 12:59
+        hours -= 12
+        tt = "PM"
+    elif not hours:  # Handle times between 0:00 and 0:59
+        hours = 12
+    return "{yy:02d}-{MM:02d}-{dd:02d} {hh}:{mm:02d}:{ss:02d} {tt}".format(
+        yy=t[0], MM=t[1], dd=t[2], hh=hours, mm=t[4], ss=t[5], tt=tt)
 
 
 def bptime():
@@ -210,16 +262,19 @@ def maintainWifi():
             print("Connected WiFi to", str(esp.ssid, "utf-8"), "with RSSI:",
                   esp.rssi)
             setSuccess("WiFi Connected")
-            
+
             try:
                 mqtt_client.disconnect()
-            except (ValueError, RuntimeError, ConnectionError, MQTT.MMQTTException) as e:
+            except (ValueError, RuntimeError, ConnectionError, TimeoutError,
+                    MQTT.MMQTTException) as e:
                 pass
-        except (RuntimeError, ConnectionError) as e:
+        except (RuntimeError, ConnectionError, TimeoutError) as e:
             print("WiFi Connect Failed: " + exprint(e))
             setError("WiFi Connect Failed: " + exprint(e))
             status_light.fill(color_nowifi)
+            status_light.fill(color_nowifi)
             return False
+    status_light.fill(color_wifi)
     return True
 
 
@@ -235,7 +290,8 @@ def maintainMqtt():
 
             try:
                 mqtt_client.reconnect(resub_topics=False)
-            except (ValueError, RuntimeError, ConnectionError, MQTT.MMQTTException) as e:
+            except (ValueError, RuntimeError, ConnectionError, TimeoutError,
+                    MQTT.MMQTTException) as e:
                 print("Failed to connect to MQTT: " + exprint(e))
                 setError("MQTT CONN FAIL: " + exprint(e))
                 loop_n_sec(15)
@@ -254,10 +310,19 @@ def maintainMqtt():
         # Do non-blocking MQTT client work
         mqtt_client.loop(timeout=0.2)
         return True
-    except (ValueError, RuntimeError, ConnectionError, MQTT.MMQTTException) as e:
+    except (ValueError, RuntimeError, ConnectionError, TimeoutError,
+            MQTT.MMQTTException) as e:
         print("MQTT ERROR: " + exprint(e))
-        if type(e).__name__ == "MMQTTException" and str(e) == "PINGRESP not returned from broker.":
+        if type(e).__name__ == "MMQTTException" and str(
+                e) == "PINGRESP not returned from broker.":
             pass
+        elif type(e).__name__ == "ConnectionError" and str(e).startswith(
+                "Failed to send "):
+            loop_n_sec(10)
+            dropWifi()
+        elif type(e).__name__ == "TimeoutError":
+            loop_n_sec(10)
+            dropWifi()
         else:
             setError("MQTT ERROR: " + exprint(e))
         return False
@@ -274,7 +339,8 @@ def requestTimesync():
     try:
         mqtt_client.publish(mqtt_topic_time, "", retain=False, qos=0)
         lastTimesync = performance_now()
-    except (ValueError, RuntimeError, ConnectionError, MQTT.MMQTTException) as e:
+    except (ValueError, RuntimeError, ConnectionError, TimeoutError,
+            MQTT.MMQTTException) as e:
         print("Time Sync Request Failed: " + exprint(e))
         setError("Time Sync Request Failed: " + exprint(e))
         loop_n_sec(10)
@@ -380,24 +446,22 @@ def message(client, topic, message):
 
 # Set up a MiniMQTT Client
 MQTT.set_socket(socket, esp)
-mqtt_client = MQTT.MQTT(
-    broker=secrets["mqttbroker"],
-    port=secrets["mqttport"],
-    username=secrets["mqttuser"],
-    password=secrets["mqttpass"],
-	keep_alive=12
-)
+mqtt_client = MQTT.MQTT(broker=secrets["mqttbroker"],
+                        port=secrets["mqttport"],
+                        username=secrets["mqttuser"],
+                        password=secrets["mqttpass"],
+                        keep_alive=12)
 # mqtt_client.on_connect = connected
 mqtt_client.on_disconnect = disconnected
 mqtt_client.on_message = message
 
-allOk = False
 while True:
     try:
         startTs = performance_now()
         clockUpdate()
         ScrollLabel(small_label1)
         ScrollLabel(small_label2)
+        #crashDumpLabel.update()
 
         allOk = False
         if maintainWifi():
@@ -405,14 +469,28 @@ while True:
                 allOk = True
                 if lastTimesync + 60000 < performance_now():
                     requestTimesync()
-
         if allOk:
             remainingMs = 200 - (performance_now() - startTs)
             if remainingMs > 10:
                 time.sleep(remainingMs / 1000.0)
         else:
             loop_n_sec(1)
-    except (ValueError, RuntimeError, ConnectionError) as e:
-        print("Error in outer loop: " + str(e))
-        setError("LOOP ERROR: " + exprint(e))
-        time.sleep(10)
+    except Exception as e:
+        if type(e).__name__ == "KeyboardInterrupt":
+            print("KeyboardInterrupt. Exiting program.")
+            break
+        try:
+            writeErrorFile(exprint(e, True))
+            #supervisor.reload()
+            print("Error in outer loop: " + exprint(e, True))
+            #crashDumpLabel.full_text = exprint(e, True)
+            setError("LOOP ERROR: " + exprint(e, True, True))
+            loop_n_sec(60)
+        except Exception as e2:
+            if type(e2).__name__ == "KeyboardInterrupt":
+                print("KeyboardInterrupt. Exiting program.")
+                break
+            print("Error in outer loop error handler: " + exprint(e2, True))
+            #crashDumpLabel.full_text = exprint(e2, True)
+            setError("LOOP INTERNAL ERROR: " + exprint(e2, True, True))
+            loop_n_sec(172800)

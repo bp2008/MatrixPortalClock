@@ -77,7 +77,7 @@ class ScrollingLabel(bitmap_label.Label):
 
     def update(self, force: bool = False) -> None:
         """Attempt to update the display. If ``animate_time`` has elapsed since
-        previews animation frame then move the characters over by 1 index.
+        previous animation frame then move the characters over by 1 index.
         Must be called in the main loop of user code.
 
         :param bool force: whether to ignore ``animation_time`` and force the update.

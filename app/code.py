@@ -5,7 +5,7 @@ import displayio
 import neopixel
 from digitalio import DigitalInOut
 from adafruit_esp32spi import adafruit_esp32spi
-import adafruit_esp32spi.adafruit_esp32spi_socket as socket
+import adafruit_connection_manager
 import adafruit_minimqtt.adafruit_minimqtt as MQTT
 import rtc
 import re
@@ -26,7 +26,7 @@ matrix = Matrix(width=64, height=32, bit_depth=4)
 display = matrix.display
 
 group = displayio.Group()
-display.show(group)
+display.root_group = group
 
 ### Load Secrets ###
 try:
@@ -110,14 +110,14 @@ def ScrollLabel(lbl):
 def exprint(e, includeStack=False, singleLine=False):
     if includeStack:
         #fullMsg = type(e).__name__ + ": " + str(e)
-        fullMsg = traceback.format_exception(type(e), e, e.__traceback__)
+        fullMsg = '\n'.join(traceback.format_exception(type(e), e, e.__traceback__))
         fullMsg = fullMsg.replace("\t", "  ")
         if singleLine:
-            fullMsg = fullMsg.replace("\r\n", "  ")
-            fullMsg = fullMsg.replace("\r", "  ")
+            #fullMsg = fullMsg.replace("\r\n", "  ")
+            #fullMsg = fullMsg.replace("\r", "  ")
             fullMsg = fullMsg.replace("\n", "  ")
-        else:
-            fullMsg = fullMsg.replace("\r\n", "\n").replace("\r", "\n")
+        #else:
+            #fullMsg = fullMsg.replace("\r\n", "\n").replace("\r", "\n")
         return fullMsg
     else:
         return type(e).__name__ + ": " + str(e)
@@ -282,9 +282,7 @@ def maintainMqtt():
     """Reconnects to MQTT if necessary and checks for messages from MQTT. Returns True if succesful, False if not connected"""
     try:
         # Connect if needed
-        try:
-            mqtt_client.is_connected()  # throws if not connected
-        except MQTT.MMQTTException as e:
+        if not mqtt_client.is_connected():
             print("Connecting MQTT")
             setInfo("Connecting MQTT")
 
@@ -312,12 +310,13 @@ def maintainMqtt():
         return True
     except (ValueError, RuntimeError, ConnectionError, TimeoutError,
             MQTT.MMQTTException) as e:
-        print("MQTT ERROR: " + exprint(e))
-        if type(e).__name__ == "MMQTTException" and str(
-                e) == "PINGRESP not returned from broker.":
-            pass
-        elif type(e).__name__ == "ConnectionError" and str(e).startswith(
-                "Failed to send "):
+        print("MQTT ERROR: " + exprint(e, True))
+        if type(e).__name__ == "MMQTTException":
+            if str(e) == "PINGRESP not returned from broker.":
+                pass
+            elif str(e) == "MiniMQTT is not connected":
+               pass
+        elif type(e).__name__ == "ConnectionError" and str(e).startswith("Failed to send "):
             loop_n_sec(10)
             dropWifi()
         elif type(e).__name__ == "TimeoutError":
@@ -440,17 +439,21 @@ def message(client, topic, message):
             if topic == mqtt_topic_prefix + "line2":
                 setLabelFromMqtt(2, message)
     except RuntimeError as e:
-        print("MQTT message processing failed. {0}: {1}. Message was {2}: {3}".
-              format(type(e).__name__, str(e), topic, message))
+        print("MQTT message processing failed. {0}. Message was {2}: {3}".
+              format(exprint(e, True), topic, message))
 
 
 # Set up a MiniMQTT Client
-MQTT.set_socket(socket, esp)
+pool = adafruit_connection_manager.get_radio_socketpool(esp)
+ssl_context = adafruit_connection_manager.get_radio_ssl_context(esp)
 mqtt_client = MQTT.MQTT(broker=secrets["mqttbroker"],
                         port=secrets["mqttport"],
                         username=secrets["mqttuser"],
                         password=secrets["mqttpass"],
-                        keep_alive=12)
+                        keep_alive=12,
+                        socket_pool=pool,
+                        ssl_context=ssl_context,
+                        socket_timeout=0.1)
 # mqtt_client.on_connect = connected
 mqtt_client.on_disconnect = disconnected
 mqtt_client.on_message = message
